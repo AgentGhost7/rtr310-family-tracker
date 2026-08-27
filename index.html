@@ -155,7 +155,8 @@ async function pollEvents(){
   if(evtTimer) clearTimeout(evtTimer);
   try{
     if(!token) await auth();
-    const r=await fetch(`${DB}/riders/${RID}/events.json?orderBy="ts"&limitToLast=8&auth=${token}&print=pretty`);
+    // Fetch the whole (small) events node and sort locally — avoids needing an .indexOn rule.
+    const r=await fetch(`${DB}/riders/${RID}/events.json?auth=${token}`);
     if(r.status===401){ token=null; await auth(); }
     else{
       const d=await r.json();
