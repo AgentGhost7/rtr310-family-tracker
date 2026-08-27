@@ -149,8 +149,8 @@ async function poll(){
 }
 // ---- Rider events (reached / on-my-way / low fuel / low battery) --------------------
 let seenEvents=null, evtTimer=null;
-const EVT_ICON={reached:"✅",fuel:"⛽",battery:"🔋",alert:"⚠️",msg:"💬"};
-const EVT_COLOR={reached:"#00e676",fuel:"#ffb300",battery:"#ff9100",alert:"#ff1744",msg:"#00e5ff"};
+const EVT_ICON={reached:"✅",fuel:"⛽",battery:"🔋",stopped_long:"🛑",alert:"⚠️",msg:"💬"};
+const EVT_COLOR={reached:"#00e676",fuel:"#ffb300",battery:"#ff9100",stopped_long:"#ff9100",alert:"#ff1744",msg:"#00e5ff"};
 async function pollEvents(){
   if(evtTimer) clearTimeout(evtTimer);
   try{
