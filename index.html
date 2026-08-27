@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>RTR 310 — Live</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  :root{--bg:#0b0e14;--card:rgba(22,27,38,.92);--cyan:#00e5ff;--green:#00e676;--amber:#ffb300;--red:#ff1744;--text:#e2e8f0;--dim:#94a3b8}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden}
+  #map{position:absolute;inset:0;background:var(--bg)}
+  .panel{position:absolute;left:12px;right:12px;bottom:12px;background:var(--card);backdrop-filter:blur(8px);border:1px solid #1e293b;border-radius:16px;padding:14px 16px;z-index:1000;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .row{display:flex;align-items:flex-end;gap:14px}
+  .spd{font-size:52px;font-weight:800;line-height:.9;font-variant-numeric:tabular-nums}
+  .spd small{font-size:15px;font-weight:600;color:var(--dim);margin-left:4px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+  .chip{background:#0b0e14;border:1px solid #263042;border-radius:10px;padding:6px 10px;font-size:12px;color:var(--dim)}
+  .chip b{color:var(--text);font-weight:700}
+  .status{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px;color:var(--dim)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--dim)}
+  .live .dot{background:var(--green);box-shadow:0 0 8px var(--green);animation:p 1.6s infinite}
+  .stale .dot{background:var(--amber)}
+  .off .dot{background:var(--red)}
+  @keyframes p{0%,100%{opacity:1}50%{opacity:.35}}
+  .setup{position:absolute;inset:0;background:var(--bg);z-index:2000;display:flex;flex-direction:column;justify-content:center;padding:28px;gap:14px}
+  .setup h1{font-size:20px;color:var(--cyan)}
+  .setup p{font-size:13px;color:var(--dim);line-height:1.5}
+  .setup input{background:#161b26;border:1px solid #263042;border-radius:10px;padding:12px;color:var(--text);font-size:13px;font-family:monospace}
+  .setup button{background:#152a2d;border:1px solid var(--cyan);color:var(--cyan);border-radius:10px;padding:13px;font-size:14px;font-weight:700}
+  .hdr{position:absolute;top:10px;left:12px;background:var(--card);border:1px solid #1e293b;border-radius:12px;padding:7px 12px;z-index:1000;font-size:12px;font-weight:700;color:var(--cyan)}
+  .leaflet-tile{filter:brightness(.85) contrast(1.05)}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="hdr" id="hdr">RTR 310 · Live</div>
+<div class="panel" id="panel" style="display:none">
+  <div class="row">
+    <div><span class="spd" id="spd">0</span><small>km/h</small></div>
+    <div class="chips">
+      <div class="chip">Gear <b id="gear">–</b></div>
+      <div class="chip"><b id="mode">–</b></div>
+    </div>
+  </div>
+  <div class="status off" id="status"><span class="dot"></span><span id="statusText">Waiting…</span></div>
+</div>
+
+<div class="setup" id="setup">
+  <h1>Pair with rider</h1>
+  <p>Paste the pairing link the rider showed you (starts with <code>rtr310://pair</code>), or the rider ID and key.</p>
+  <input id="pairInput" placeholder="rtr310://pair?rid=…&k=…" autocapitalize="off" autocorrect="off"/>
+  <button onclick="startFromInput()">Start tracking</button>
+  <p style="font-size:11px">Your rider's location is end-to-end encrypted. This page decrypts it locally with the key in the pairing link — the server never sees it.</p>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API_KEY="AIzaSyCB2Sk2GmL7SW52ZtQMd-G48W8oTTmS_S4";
+const DB="https://rtr310-tracking-default-rtdb.asia-southeast1.firebasedatabase.app";
+let RID=null, KEYRAW=null, token=null, map=null, marker=null, trail=null, cryptoKey=null;
+let lastTs=0, pollTimer=null;
+
+function parsePairing(s){
+  s=s.trim();
+  try{
+    if(s.startsWith("rtr310://")){ const u=new URL(s.replace("rtr310://","https://x/")); return {rid:u.searchParams.get("rid"), k:u.searchParams.get("k")}; }
+  }catch(e){}
+  // fallback: "rid k"
+  const p=s.split(/\s+/); if(p.length===2) return {rid:p[0], k:p[1]};
+  return null;
+}
+function showError(msg){
+  let e=document.getElementById("errbar");
+  if(!e){ e=document.createElement("div"); e.id="errbar";
+    e.style.cssText="position:absolute;top:0;left:0;right:0;z-index:3000;background:#ff1744;color:#fff;padding:10px 14px;font-size:12px;font-weight:600";
+    document.body.appendChild(e); }
+  e.textContent=msg;
+}
+function startFromInput(){
+  try{
+    const v=document.getElementById("pairInput").value;
+    const parsed=parsePairing(v);
+    if(!parsed||!parsed.rid||!parsed.k){ showError("Couldn't read that pairing link — check you copied all of it."); return; }
+    // encode so +, /, = in the base64 key survive the URL hash intact
+    location.hash = "rid="+encodeURIComponent(parsed.rid)+"&k="+encodeURIComponent(parsed.k);
+    boot();
+  }catch(e){ showError("Error: "+(e&&e.message||e)); }
+}
+function b64ToBytes(b){ const s=atob(b.replace(/-/g,'+').replace(/_/g,'/')); const a=new Uint8Array(s.length); for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i); return a; }
+
+async function boot(){
+  try{
+    const h=new URLSearchParams(location.hash.slice(1));
+    RID=h.get("rid"); const kb=h.get("k");
+    if(!RID||!kb){ document.getElementById("setup").style.display="flex"; return; }
+    if(!(window.crypto&&window.crypto.subtle)){
+      showError("This browser blocks decryption on a local file. Open the HTTPS link instead (secure page).");
+      return;
+    }
+    document.getElementById("setup").style.display="none";
+    KEYRAW=b64ToBytes(kb);
+    cryptoKey=await crypto.subtle.importKey("raw",KEYRAW,{name:"AES-GCM"},false,["decrypt"]);
+    initMap();
+    document.getElementById("panel").style.display="block";
+    await auth();
+    poll();
+  }catch(e){ showError("Start failed: "+(e&&e.message||e)); }
+}
+function initMap(){
+  if(map) return;
+  map=L.map('map',{zoomControl:false,attributionControl:false}).setView([12.87,77.62],15);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+  L.control.attribution({position:'topright',prefix:false}).addAttribution('© OpenStreetMap').addTo(map);
+  trail=L.polyline([],{color:'#00e5ff',weight:4,opacity:.7}).addTo(map);
+  marker=L.circleMarker([12.87,77.62],{radius:9,color:'#0b0e14',weight:3,fillColor:'#00e5ff',fillOpacity:1}).addTo(map);
+}
+async function auth(){
+  try{
+    const r=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:'{"returnSecureToken":true}'});
+    token=(await r.json()).idToken;
+  }catch(e){ setStatus("off","Sign-in failed"); }
+}
+async function decrypt(ct,iv){
+  const pt=await crypto.subtle.decrypt({name:"AES-GCM",iv:b64ToBytes(iv)},cryptoKey,b64ToBytes(ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+function setStatus(cls,text){ const s=document.getElementById("status"); s.className="status "+cls; document.getElementById("statusText").textContent=text; }
+function ago(ms){ const d=Math.max(0,(Date.now()-ms)/1000); if(d<60)return Math.round(d)+"s ago"; return Math.round(d/60)+"m ago"; }
+
+async function poll(){
+  if(pollTimer) clearTimeout(pollTimer);
+  try{
+    if(!token) await auth();
+    const r=await fetch(`${DB}/riders/${RID}/live.json?auth=${token}`);
+    if(r.status===401){ token=null; await auth(); }
+    const d=await r.json();
+    if(d&&d.ct){
+      const p=await decrypt(d.ct,d.iv);
+      render(p);
+    }else{
+      setStatus("off","No live data yet");
+    }
+  }catch(e){ setStatus("stale","Reconnecting…"); }
+  pollTimer=setTimeout(poll,2500);
+}
+function render(p){
+  document.getElementById("spd").textContent=Math.round(p.spd);
+  document.getElementById("gear").textContent=(p.gear===0?"N":p.gear);
+  document.getElementById("mode").textContent=p.mode||"–";
+  const fresh=Date.now()-p.ts < 15000;          // is the whole update recent
+  const hasPos=p.gpsFresh && p.lat && p.lon && !(p.lat===0&&p.lon===0);
+
+  if(!fresh){ setStatus("stale","Last seen "+ago(p.ts)); }
+  else if(p.stopped){ setStatus("stale","Stopped · "+ago(p.ts)); }
+  else if(hasPos){ setStatus("live","Live · "+ago(p.ts)); }
+  else { setStatus("stale","Riding · acquiring GPS…"); }   // moving, but no lock yet
+
+  if(hasPos){
+    const ll=[p.lat,p.lon];
+    marker.setLatLng(ll); marker.setStyle({fillColor:'#00e5ff'});
+    const t=trail.getLatLngs(); if(t.length===0||t[t.length-1].lat!==p.lat||t[t.length-1].lng!==p.lon){ trail.addLatLng(ll); if(trail.getLatLngs().length>300)trail.setLatLngs(trail.getLatLngs().slice(-300)); }
+    map.panTo(ll,{animate:true});
+  } else {
+    marker.setStyle({fillColor:'#475569'});   // dim the marker while position is unknown
+  }
+}
+window.addEventListener("hashchange",boot);
+boot();
+</script>
+</body>
+</html>
