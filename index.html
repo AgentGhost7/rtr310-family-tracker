@@ -35,6 +35,7 @@
 <body>
 <div id="map"></div>
 <div class="hdr" id="hdr">RTR 310 · Live</div>
+<div id="events" style="position:absolute;top:44px;left:12px;right:12px;z-index:1200;display:flex;flex-direction:column;gap:6px;pointer-events:none"></div>
 <div class="panel" id="panel" style="display:none">
   <div class="row">
     <div><span class="spd" id="spd">0</span><small>km/h</small></div>
@@ -103,8 +104,10 @@ async function boot(){
     cryptoKey=await crypto.subtle.importKey("raw",KEYRAW,{name:"AES-GCM"},false,["decrypt"]);
     initMap();
     document.getElementById("panel").style.display="block";
+    if("Notification" in window && Notification.permission==="default"){ try{ Notification.requestPermission(); }catch(e){} }
     await auth();
     poll();
+    pollEvents();
   }catch(e){ showError("Start failed: "+(e&&e.message||e)); }
 }
 function initMap(){
@@ -144,6 +147,43 @@ async function poll(){
   }catch(e){ setStatus("stale","Reconnecting…"); }
   pollTimer=setTimeout(poll,2500);
 }
+// ---- Rider events (reached / on-my-way / low fuel / low battery) --------------------
+let seenEvents=null, evtTimer=null;
+const EVT_ICON={reached:"✅",fuel:"⛽",battery:"🔋",alert:"⚠️",msg:"💬"};
+const EVT_COLOR={reached:"#00e676",fuel:"#ffb300",battery:"#ff9100",alert:"#ff1744",msg:"#00e5ff"};
+async function pollEvents(){
+  if(evtTimer) clearTimeout(evtTimer);
+  try{
+    if(!token) await auth();
+    const r=await fetch(`${DB}/riders/${RID}/events.json?orderBy="ts"&limitToLast=8&auth=${token}&print=pretty`);
+    if(r.status===401){ token=null; await auth(); }
+    else{
+      const d=await r.json();
+      if(d){
+        const keys=Object.keys(d).sort((a,b)=>(d[a].ts||0)-(d[b].ts||0));
+        if(seenEvents===null){ seenEvents=new Set(keys); }   // first load: don't replay history
+        else for(const k of keys){
+          if(seenEvents.has(k)) continue;
+          seenEvents.add(k);
+          try{ const p=await decrypt(d[k].ct,d[k].iv); showEvent(p); }catch(e){}
+        }
+      }
+    }
+  }catch(e){}
+  evtTimer=setTimeout(pollEvents,4000);
+}
+function showEvent(p){
+  const type=p.type||"msg", color=EVT_COLOR[type]||"#00e5ff", icon=EVT_ICON[type]||"💬";
+  const box=document.getElementById("events");
+  const el=document.createElement("div");
+  el.style.cssText=`background:${color};color:#0b0e14;font-weight:700;font-size:13px;padding:10px 13px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.5);pointer-events:auto`;
+  el.textContent=`${icon}  ${p.text||type}`;
+  box.prepend(el);
+  setTimeout(()=>{ el.style.transition="opacity .6s"; el.style.opacity="0"; setTimeout(()=>el.remove(),700); }, 15000);
+  try{ if("Notification" in window && Notification.permission==="granted") new Notification("RTR 310 rider", {body:p.text||type}); }catch(e){}
+  try{ navigator.vibrate&&navigator.vibrate(200); }catch(e){}
+}
+
 function render(p){
   document.getElementById("spd").textContent=Math.round(p.spd);
   document.getElementById("gear").textContent=(p.gear===0?"N":p.gear);
